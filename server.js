@@ -23,7 +23,15 @@ const io = new Server(server, {
   pingTimeout: 60000,
   pingInterval: 25000
 });
-
+// টেস্ট টোকন জেনারেটর (শুধু ডেভেলপমেন্টের জন্য)
+app.get('/test-token', (req, res) => {
+  // একটি ডেমো ইউজার আইডি তৈরি করুন
+  const userId = 'test_user_' + Date.now();
+  res.json({ 
+    token: `mock_${userId}`,
+    userId: userId 
+  });
+});
 // Supabase token verification helper
 async function verifySupabaseToken(token) {
   const supabaseUrl = process.env.SUPABASE_URL;
