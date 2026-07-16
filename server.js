@@ -23,23 +23,23 @@ const io = new Server(server, {
   pingTimeout: 60000,
   pingInterval: 25000
 });
-// টেস্ট টোকন জেনারেটর (শুধু ডেভেলপমেন্টের জন্য)
+
+// টেস্ট টোকন জেনারেটর
 app.get('/test-token', (req, res) => {
-  // একটি ডেমো ইউজার আইডি তৈরি করুন
   const userId = 'test_user_' + Date.now();
   res.json({ 
     token: `mock_${userId}`,
     userId: userId 
   });
 });
+
 // Supabase token verification helper
 async function verifySupabaseToken(token) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const anonKey = process.env.SUPABASE_ANON_KEY;
 
   if (!supabaseUrl || !anonKey) {
-    console.warn('⚠️ Server missing SUPABASE_URL or SUPABASE_ANON_KEY env variables. Running in development permissive mode.');
-    // In permissive/offline mode, we can parse dummy user id if JWT matches "mock_*"
+    console.warn('⚠️ Server missing SUPABASE_URL or SUPABASE_ANON_KEY env variables.');
     if (token && token.startsWith('mock_')) {
       return { id: token, email: `${token}@example.com` };
     }
@@ -68,8 +68,6 @@ async function verifySupabaseToken(token) {
   }
 }
 
-// Track active users and their socket IDs
-// Key: userId, Value: Set of socketIds (to support multiple devices/tabs per user)
 const activeUsers = new Map();
 
 io.use(async (socket, next) => {
@@ -92,29 +90,25 @@ io.on('connection', (socket) => {
   const userId = socket.userId;
   console.log(`🔌 User connected: ${userId} (${socket.userEmail}) [Socket: ${socket.id}]`);
 
-  // Register user socket
   if (!activeUsers.has(userId)) {
     activeUsers.set(userId, new Set());
   }
   activeUsers.get(userId).add(socket.id);
-
-  // Join a personal room named after the userId
   socket.join(userId);
-
-  // Notify of updated online user status
   io.emit('user-status-changed', { userId, status: 'online' });
 
-  // 1. CALL USER (Offer)
+  // 1. CALL USER
   socket.on('call-user', (data) => {
     const { targetUserId, offer, isVideo, callerName, callerAvatar } = data;
-    console.log(`📞 [Call User] From ${userId} to ${targetUserId} (Video: ${isVideo})`);
+    console.log(`📞 [Call User] From ${userId} to ${targetUserId}`);
+    // মার্চ করা লগ:
+    console.log(`[RENDER-LOG] CALL_INITIATED: Caller [${userId}] -> Receiver [${data.targetUserId}]`);
 
     if (!activeUsers.has(targetUserId) || activeUsers.get(targetUserId).size === 0) {
       socket.emit('call-failed', { targetUserId, reason: 'user_offline' });
       return;
     }
 
-    // Forward the offer to all active sockets of the callee
     socket.to(targetUserId).emit('incoming-call', {
       callerId: userId,
       offer,
@@ -124,17 +118,25 @@ io.on('connection', (socket) => {
     });
   });
 
-  // 2. ACCEPT CALL (Answer)
+  // RINGING EVENT
+  socket.on('ringing', (data) => {
+    // মার্চ করা লগ:
+    console.log(`[RENDER-LOG] RINGING: Signal sent to Receiver [${data.targetUserId}]`);
+    socket.to(data.targetUserId).emit('incoming-ringing', { callerId: userId });
+  });
+
+  // 2. ACCEPT CALL
   socket.on('accept-call', (data) => {
     const { callerId, answer } = data;
     console.log(`✅ [Accept Call] Callee ${userId} accepted call from ${callerId}`);
+    // মার্চ করা লগ:
+    console.log(`[RENDER-LOG] CALL_ACCEPTED: Callee [${userId}] accepted from [${data.callerId}]`);
 
     if (!activeUsers.has(callerId) || activeUsers.get(callerId).size === 0) {
       socket.emit('call-failed', { targetUserId: callerId, reason: 'caller_disconnected' });
       return;
     }
 
-    // Forward answer to caller
     socket.to(callerId).emit('call-accepted', {
       calleeId: userId,
       answer
@@ -144,7 +146,9 @@ io.on('connection', (socket) => {
   // 3. REJECT CALL
   socket.on('reject-call', (data) => {
     const { callerId, reason } = data;
-    console.log(`❌ [Reject Call] Callee ${userId} rejected call from ${callerId}. Reason: ${reason}`);
+    console.log(`❌ [Reject Call] Callee ${userId} rejected call from ${callerId}`);
+    // মার্চ করা লগ:
+    console.log(`[RENDER-LOG] CALL_REJECTED: Callee [${userId}] rejected from [${data.callerId}]`);
 
     socket.to(callerId).emit('call-rejected', {
       calleeId: userId,
@@ -154,13 +158,9 @@ io.on('connection', (socket) => {
 
   // 4. ICE CANDIDATE
   socket.on('ice-candidate', (data) => {
-    const { targetUserId, candidate } = data;
-    // Log occasionally to avoid spamming
-    // console.log(`❄️ [ICE Candidate] From ${userId} to ${targetUserId}`);
-
-    socket.to(targetUserId).emit('ice-candidate', {
+    socket.to(data.targetUserId).emit('ice-candidate', {
       senderId: userId,
-      candidate
+      candidate: data.candidate
     });
   });
 
@@ -168,6 +168,8 @@ io.on('connection', (socket) => {
   socket.on('end-call', (data) => {
     const { targetUserId } = data;
     console.log(`📴 [End Call] Call ended between ${userId} and ${targetUserId}`);
+    // মার্চ করা লগ:
+    console.log(`[RENDER-LOG] CALL_ENDED: Connection closed between [${userId}] and [${data.targetUserId}]`);
 
     socket.to(targetUserId).emit('call-ended', {
       senderId: userId
