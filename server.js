@@ -1,4 +1,4 @@
-console.log("TEST: Connection established successfully!");
+Console.log("TEST: Connection established successfully!");
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -102,7 +102,6 @@ io.on('connection', (socket) => {
   socket.on('call-user', (data) => {
     const { targetUserId, offer, isVideo, callerName, callerAvatar } = data;
     console.log(`📞 [Call User] From ${userId} to ${targetUserId}`);
-    // মার্চ করা লগ:
     console.log(`[RENDER-LOG] CALL_INITIATED: Caller [${userId}] -> Receiver [${data.targetUserId}]`);
 
     if (!activeUsers.has(targetUserId) || activeUsers.get(targetUserId).size === 0) {
@@ -121,7 +120,6 @@ io.on('connection', (socket) => {
 
   // RINGING EVENT
   socket.on('ringing', (data) => {
-    // মার্চ করা লগ:
     console.log(`[RENDER-LOG] RINGING: Signal sent to Receiver [${data.targetUserId}]`);
     socket.to(data.targetUserId).emit('incoming-ringing', { callerId: userId });
   });
@@ -130,7 +128,6 @@ io.on('connection', (socket) => {
   socket.on('accept-call', (data) => {
     const { callerId, answer } = data;
     console.log(`✅ [Accept Call] Callee ${userId} accepted call from ${callerId}`);
-    // মার্চ করা লগ:
     console.log(`[RENDER-LOG] CALL_ACCEPTED: Callee [${userId}] accepted from [${data.callerId}]`);
 
     if (!activeUsers.has(callerId) || activeUsers.get(callerId).size === 0) {
@@ -148,7 +145,6 @@ io.on('connection', (socket) => {
   socket.on('reject-call', (data) => {
     const { callerId, reason } = data;
     console.log(`❌ [Reject Call] Callee ${userId} rejected call from ${callerId}`);
-    // মার্চ করা লগ:
     console.log(`[RENDER-LOG] CALL_REJECTED: Callee [${userId}] rejected from [${data.callerId}]`);
 
     socket.to(callerId).emit('call-rejected', {
@@ -169,7 +165,6 @@ io.on('connection', (socket) => {
   socket.on('end-call', (data) => {
     const { targetUserId } = data;
     console.log(`📴 [End Call] Call ended between ${userId} and ${targetUserId}`);
-    // মার্চ করা লগ:
     console.log(`[RENDER-LOG] CALL_ENDED: Connection closed between [${userId}] and [${data.targetUserId}]`);
 
     socket.to(targetUserId).emit('call-ended', {
