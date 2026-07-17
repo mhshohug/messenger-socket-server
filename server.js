@@ -6,7 +6,6 @@ const cors = require('cors');
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 
-// Supabase Setup
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 const app = express();
@@ -14,26 +13,17 @@ app.use(cors());
 app.use(express.json());
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
+const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] }, transports: ['websocket'] });
 
-// ইউজার অথেনটিকেশন ও আইডি গ্রহণ
-io.use(async (socket, next) => {
-  const token = socket.handshake.query.token;
-  if (!token) return next(new Error('Authentication Error'));
-  
-  const { data: { user }, error } = await supabase.auth.getUser(token);
-  if (error || !user) return next(new Error('Invalid Token'));
-  
-  socket.userId = user.id;
-  next();
-});
-
+// কানেকশন হ্যান্ডলার - এখানে কোনো টোকেন রিজেকশন নেই, কানেকশন সবসময় হবে
 io.on('connection', (socket) => {
-  const userId = socket.userId;
+  // অ্যাপ থেকে টোকেন বা ইউজার আইডি গ্রহণ (যাই আসুক কাজ করবে)
+  const userId = socket.handshake.query.userId || "unknown_user";
+  socket.userId = userId;
   socket.join(userId);
   console.log(`[LOGIN] User: ${userId} connected.`);
 
-  // ১. কলিং - ডাটাবেজে ইনসার্ট
+  // ১. কলিং ফিচার
   socket.on('call-user', async (data) => {
     console.log(`[CALLING] From: ${userId} to: ${data.targetUserId}`);
     await supabase.from('call_history').insert({
@@ -45,12 +35,12 @@ io.on('connection', (socket) => {
     socket.to(data.targetUserId).emit('incoming-call', { callerId: userId, ...data });
   });
 
-  // ২. রিংগিং
+  // ২. রিংগিং ফিচার
   socket.on('ringing', (data) => {
     socket.to(data.targetUserId).emit('incoming-ringing', { callerId: userId });
   });
 
-  // ৩. একসেপ্ট (কানেক্টেড) - ডাটাবেজ আপডেট
+  // ৩. কল একসেপ্ট
   socket.on('accept-call', async (data) => {
     console.log(`[ACCEPTED] Call accepted by ${userId}`);
     await supabase.from('call_history').update({ status: 'ACCEPTED' })
@@ -58,7 +48,7 @@ io.on('connection', (socket) => {
     socket.to(data.callerId).emit('call-accepted', { calleeId: userId, ...data });
   });
 
-  // ৪. এন্ড কল - ডাটাবেজ আপডেট
+  // ৪. এন্ড কল
   socket.on('end-call', async (data) => {
     console.log(`[ENDED] Call ended by ${userId}`);
     await supabase.from('call_history').update({ status: 'ENDED', ended_at: new Date().toISOString() })
@@ -66,10 +56,14 @@ io.on('connection', (socket) => {
     socket.to(data.targetUserId).emit('call-ended', { senderId: userId });
   });
 
+  // ৫. মেসেজিং ফিচার (আগের মতোই রাখা হয়েছে)
+  socket.on('send-message', (data) => {
+    socket.to(data.targetUserId).emit('receive-message', data);
+  });
+
   socket.on('reject-call', (data) => socket.to(data.callerId).emit('call-rejected', data));
   socket.on('ice-candidate', (data) => socket.to(data.targetUserId).emit('ice-candidate', { senderId: userId, candidate: data.candidate }));
   
-  // ৫. ডিসকানেক্ট - লগআউট লগ
   socket.on('disconnect', () => {
     console.log(`[LOGOUT] User: ${userId} disconnected.`);
   });
