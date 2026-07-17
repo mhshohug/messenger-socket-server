@@ -60,13 +60,27 @@ io.on('connection', (socket) => {
     const { targetUserId } = data;
     console.log(`📞 [Call User] From ${userId} to ${targetUserId}`);
     
-    // Save to Supabase
-    await supabase.from('call_history').insert({
-      caller_id: userId,
-      receiver_id: targetUserId,
-      status: 'CALLING',
-      started_at: new Date()
-    }).catch(e => console.error("History Insert Error:", e));
+    // মডিফাইড ইনসার্ট লজিক
+    try {
+        const { error } = await supabase
+            .from('call_history')
+            .insert([
+                {
+                    caller_id: userId,
+                    receiver_id: targetUserId,
+                    status: 'CALLING',
+                    started_at: new Date().toISOString()
+                }
+            ]);
+
+        if (error) {
+            console.error("Supabase Insert Error:", error);
+        } else {
+            console.log("Successfully saved call history to Supabase");
+        }
+    } catch (e) {
+        console.error("Fatal History Insert Error:", e);
+    }
 
     if (!activeUsers.has(targetUserId)) {
       socket.emit('call-failed', { targetUserId, reason: 'user_offline' });
