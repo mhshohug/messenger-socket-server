@@ -1,73 +1,331 @@
-console.log("TEST: Signaling server running (Full Features)!");
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const cors = require('cors');
-require('dotenv').config();
-const { createClient } = require('@supabase/supabase-js');
+console.log("🚀 Production Signaling Server Starting...");
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+require("dotenv").config();
+
+const express = require("express");
+const http = require("http");
+const cors = require("cors");
+const { Server } = require("socket.io");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
-app.use(cors());
+
+app.use(cors({
+    origin: "*",
+    methods: ["GET", "POST"]
+}));
+
 app.use(express.json());
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*', methods: ['GET', 'POST'] }, transports: ['websocket'] });
 
-// কানেকশন হ্যান্ডলার - এখানে কোনো টোকেন রিজেকশন নেই, কানেকশন সবসময় হবে
-io.on('connection', (socket) => {
-  // অ্যাপ থেকে টোকেন বা ইউজার আইডি গ্রহণ (যাই আসুক কাজ করবে)
-  const userId = socket.handshake.query.userId || "unknown_user";
-  socket.userId = userId;
-  socket.join(userId);
-  console.log(`[LOGIN] User: ${userId} connected.`);
-
-  // ১. কলিং ফিচার
-  socket.on('call-user', async (data) => {
-    console.log(`[CALLING] From: ${userId} to: ${data.targetUserId}`);
-    await supabase.from('call_history').insert({
-        caller_id: userId,
-        receiver_id: data.targetUserId,
-        status: 'CALLING',
-        started_at: new Date().toISOString()
-    });
-    socket.to(data.targetUserId).emit('incoming-call', { callerId: userId, ...data });
-  });
-
-  // ২. রিংগিং ফিচার
-  socket.on('ringing', (data) => {
-    socket.to(data.targetUserId).emit('incoming-ringing', { callerId: userId });
-  });
-
-  // ৩. কল একসেপ্ট
-  socket.on('accept-call', async (data) => {
-    console.log(`[ACCEPTED] Call accepted by ${userId}`);
-    await supabase.from('call_history').update({ status: 'ACCEPTED' })
-        .eq('receiver_id', userId).eq('status', 'CALLING');
-    socket.to(data.callerId).emit('call-accepted', { calleeId: userId, ...data });
-  });
-
-  // ৪. এন্ড কল
-  socket.on('end-call', async (data) => {
-    console.log(`[ENDED] Call ended by ${userId}`);
-    await supabase.from('call_history').update({ status: 'ENDED', ended_at: new Date().toISOString() })
-            .eq('caller_id', data.targetUserId).eq('status', 'ACCEPTED');
-    socket.to(data.targetUserId).emit('call-ended', { senderId: userId });
-  });
-
-  // ৫. মেসেজিং ফিচার (আগের মতোই রাখা হয়েছে)
-  socket.on('send-message', (data) => {
-    socket.to(data.targetUserId).emit('receive-message', data);
-  });
-
-  socket.on('reject-call', (data) => socket.to(data.callerId).emit('call-rejected', data));
-  socket.on('ice-candidate', (data) => socket.to(data.targetUserId).emit('ice-candidate', { senderId: userId, candidate: data.candidate }));
-  
-  socket.on('disconnect', () => {
-    console.log(`[LOGOUT] User: ${userId} disconnected.`);
-  });
+const io = new Server(server, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    },
+    allowEIO3: true
 });
 
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+const onlineUsers = new Map();
+
+app.get("/", (req, res) => {
+    res.json({
+        success: true,
+        message: "Messenger Signaling Server Running",
+        onlineUsers: onlineUsers.size,
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString()
+    });
+});
+
+app.get("/health", (req, res) => {
+    res.status(200).json({
+        status: "OK",
+        websocket: true,
+        onlineUsers: onlineUsers.size,
+        time: new Date().toISOString()
+    });
+});
+
+io.on("connection", (socket) => {
+
+    const userId =
+        socket.handshake.auth?.userId ||
+        socket.handshake.query?.userId ||
+        socket.handshake.headers["x-user-id"] ||
+        socket.id;
+
+    socket.userId = userId;
+
+    socket.join(userId);
+
+    onlineUsers.set(userId, socket.id);
+
+    console.log(`🟢 ${userId} connected`);
+
+    io.emit("user-online", {
+        userId,
+        online: true
+    });
+
+    socket.on("register-user", (data) => {
+
+        const id = data?.userId || userId;
+
+        socket.userId = id;
+
+        socket.join(id);
+
+        onlineUsers.set(id, socket.id);
+
+        console.log(`✅ Registered : ${id}`);
+
+        io.emit("user-online", {
+            userId: id,
+            online: true
+        });
+
+    });
+      // ==========================
+    // CALL USER
+    // ==========================
+    socket.on("call-user", async (data) => {
+
+        try {
+
+            console.log(`[CALL] ${socket.userId} -> ${data.targetUserId}`);
+
+            await supabase
+                .from("call_history")
+                .insert({
+                    caller_id: socket.userId,
+                    receiver_id: data.targetUserId,
+                    call_type: data.callType || "audio",
+                    status: "CALLING",
+                    started_at: new Date().toISOString()
+                });
+
+            io.to(data.targetUserId).emit("incoming-call", {
+                callerId: socket.userId,
+                callerName: data.callerName,
+                callerPhoto: data.callerPhoto,
+                callType: data.callType || "audio"
+            });
+
+        } catch (err) {
+            console.error(err);
+        }
+
+    });
+
+    // ==========================
+    // RINGING
+    // ==========================
+    socket.on("ringing", (data) => {
+
+        io.to(data.targetUserId).emit("incoming-ringing", {
+            callerId: socket.userId
+        });
+
+    });
+
+    // ==========================
+    // ACCEPT CALL
+    // ==========================
+    socket.on("accept-call", async (data) => {
+
+        await supabase
+            .from("call_history")
+            .update({
+                status: "ACCEPTED"
+            })
+            .eq("caller_id", data.callerId)
+            .eq("receiver_id", socket.userId)
+            .eq("status", "CALLING");
+
+        io.to(data.callerId).emit("call-accepted", {
+            calleeId: socket.userId
+        });
+
+    });
+
+    // ==========================
+    // REJECT CALL
+    // ==========================
+    socket.on("reject-call", (data) => {
+
+        io.to(data.callerId).emit("call-rejected", {
+            receiverId: socket.userId
+        });
+
+    });
+
+    // ==========================
+    // WEBRTC OFFER
+    // ==========================
+    socket.on("offer", (data) => {
+
+        io.to(data.targetUserId).emit("offer", {
+            senderId: socket.userId,
+            offer: data.offer
+        });
+
+    });
+
+    // ==========================
+    // WEBRTC ANSWER
+    // ==========================
+    socket.on("answer", (data) => {
+
+        io.to(data.targetUserId).emit("answer", {
+            senderId: socket.userId,
+            answer: data.answer
+        });
+
+    });
+
+    // ==========================
+    // ICE CANDIDATE
+    // ==========================
+    socket.on("ice-candidate", (data) => {
+
+        io.to(data.targetUserId).emit("ice-candidate", {
+            senderId: socket.userId,
+            candidate: data.candidate
+        });
+
+    });
+
+    // ==========================
+    // END CALL
+    // ==========================
+    socket.on("end-call", async (data) => {
+
+        await supabase
+            .from("call_history")
+            .update({
+                status: "ENDED",
+                ended_at: new Date().toISOString()
+            })
+            .eq("caller_id", data.callerId)
+            .eq("receiver_id", data.targetUserId);
+
+        io.to(data.targetUserId).emit("call-ended", {
+            senderId: socket.userId
+        });
+
+    });
+      // ==========================
+    // SEND MESSAGE
+    // ==========================
+    socket.on("send-message", (data) => {
+
+        io.to(data.targetUserId).emit("receive-message", {
+            senderId: socket.userId,
+            message: data.message,
+            type: data.type || "text",
+            image: data.image || null,
+            file: data.file || null,
+            createdAt: new Date().toISOString()
+        });
+
+    });
+
+    // ==========================
+    // TYPING
+    // ==========================
+    socket.on("typing", (data) => {
+
+        io.to(data.targetUserId).emit("typing", {
+            senderId: socket.userId
+        });
+
+    });
+
+    socket.on("stop-typing", (data) => {
+
+        io.to(data.targetUserId).emit("stop-typing", {
+            senderId: socket.userId
+        });
+
+    });
+
+    // ==========================
+    // MESSAGE SEEN
+    // ==========================
+    socket.on("message-seen", (data) => {
+
+        io.to(data.targetUserId).emit("message-seen", {
+            messageId: data.messageId,
+            readerId: socket.userId
+        });
+
+    });
+
+    // ==========================
+    // HEARTBEAT
+    // ==========================
+    socket.on("ping-server", () => {
+
+        socket.emit("pong-server", {
+            time: Date.now()
+        });
+
+    });
+
+    // ==========================
+    // DISCONNECT
+    // ==========================
+    socket.on("disconnect", () => {
+
+        onlineUsers.delete(socket.userId);
+
+        console.log(`🔴 ${socket.userId} disconnected`);
+
+        io.emit("user-offline", {
+            userId: socket.userId,
+            online: false
+        });
+
+    });
+
+    // ==========================
+    // SOCKET ERROR
+    // ==========================
+    socket.on("error", (err) => {
+
+        console.error("Socket Error:", err);
+
+    });
+
+});
+
+// ==========================
+// SERVER ERROR
+// ==========================
+server.on("error", (err) => {
+
+    console.error("Server Error:", err);
+
+});
+
+// ==========================
+// START SERVER
+// ==========================
 const PORT = process.env.PORT || 10000;
-server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Signaling server running on port ${PORT}`));
+
+server.listen(PORT, "0.0.0.0", () => {
+
+    console.log("==================================");
+    console.log("🚀 Messenger Signaling Server");
+    console.log(`🌐 Port : ${PORT}`);
+    console.log("✅ Production Ready");
+    console.log("==================================");
+
+});
