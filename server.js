@@ -59,8 +59,8 @@ async function sendFcmNotification(targetUserId, data, senderId = null) {
     const sender = senderRes.data;
 
     if (recipientRes.error || !profile || !profile.fcm_token) {
-      console.log(`[FCM] No token found for user ${targetUserId}`);
-      return;
+      console.log(`[FCM] FCM token not found for the user ${targetUserId}`);
+      return { success: false, error: 'FCM token not found for the user' };
     }
 
     const senderName = sender ? sender.full_name : (data.callerName || 'Someone');
@@ -90,6 +90,7 @@ async function sendFcmNotification(targetUserId, data, senderId = null) {
 
     const response = await admin.messaging().send(message);
     console.log(`[FCM] Successfully sent message to ${targetUserId}:`, response);
+    return { success: true };
   } catch (error) {
     console.error(`[FCM] Error sending message to ${targetUserId}:`, error);
     if (error.code === 'messaging/registration-token-not-registered' || error.code === 'messaging/invalid-registration-token') {
@@ -99,6 +100,7 @@ async function sendFcmNotification(targetUserId, data, senderId = null) {
         .update({ fcm_token: null })
         .eq('id', targetUserId);
     }
+    return { success: false, error: error.message };
   }
 }
 
@@ -121,27 +123,35 @@ io.on('connection', (socket) => {
 
   // 1. New Message
   socket.on('send-message', async (data) => {
-    console.log(`[Message] From ${userId} to ${data.targetUserId}`);
+    const targetUserId = data.targetUserId || data.receiver_id || data.receiverId;
+    console.log(`[Message] From ${userId} to ${targetUserId}`);
     
-    const targetSocketId = users.get(data.targetUserId);
+    const targetSocketId = users.get(targetUserId);
     if (targetSocketId) {
       // Realtime delivery
       io.to(targetSocketId).emit('receive-message', data);
     } else {
       // Background delivery via FCM
       const isMissedCall = (data.content || '').includes('Missed Call');
-      await sendFcmNotification(data.targetUserId, {
+      await sendFcmNotification(targetUserId, {
         type: isMissedCall ? 'MISSED_CALL' : 'MESSAGE',
         title: isMissedCall ? 'Missed Call' : 'New Message',
-        body: data.text || data.content || 'Tap to view',
+        body: data.text || data.content || (data.message_type === 'voice' ? 'Voice message' : 'Tap to view'),
         senderId: userId,
-        chatId: data.chatId || '',
+        chatId: data.chatId || data.chat_id || '',
         messageId: data.id
       }, userId);
     }
   });
 
   // 2. Call Signaling
+  socket.on('signal', async (data) => {
+    const targetSocketId = users.get(data.targetUserId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('signal', data);
+    }
+  });
+
   socket.on('call-user', async (data) => {
     console.log(`[Call] Offer from ${userId} to ${data.targetUserId}`);
     
@@ -150,7 +160,7 @@ io.on('connection', (socket) => {
       io.to(targetSocketId).emit('incoming-call', data);
     } else {
       // Send FCM for incoming call
-      await sendFcmNotification(data.targetUserId, {
+      const res = await sendFcmNotification(data.targetUserId, {
         type: 'CALL',
         title: 'Incoming Call',
         body: `${data.callerName || 'Someone'} is calling you...`,
@@ -159,6 +169,10 @@ io.on('connection', (socket) => {
         callType: data.isVideo ? 'VIDEO' : 'AUDIO',
         sdp: data.offer ? data.offer.sdp : ''
       }, userId);
+      
+      if (!res || !res.success) {
+        socket.emit('call-rejected', { targetUserId: data.targetUserId, reason: 'User offline and unreachable' });
+      }
     }
   });
 
