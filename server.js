@@ -19,13 +19,24 @@ app.use(express.json());
 
 const server = http.createServer(app);
 
+// 1. Configure Socket.IO with appropriate timeouts
 const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    },
-    allowEIO3: true
+  pingInterval: 10000, // Matches client ping
+  pingTimeout: 5000,
+  cors: { origin: "*" }
 });
+
+io.on("connection", (socket) => {
+  // 2. Handle the application-level heartbeat
+  socket.on("ping-server", (data) => {
+    socket.emit("pong-client", { serverTime: Date.now() });
+  });
+
+  // ... existing signaling logic
+});
+
+// 3. Optional: Add a simple health check route for the HTTP Keep-Alive
+app.get("/", (req, res) => res.send("Signaling Server Active"));
 
 const supabase = createClient(
     process.env.SUPABASE_URL,
