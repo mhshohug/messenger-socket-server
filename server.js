@@ -1,342 +1,207 @@
-console.log("🚀 Production Signaling Server Starting...");
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const admin = require('firebase-admin');
+const { createClient } = require('@supabase/supabase-js');
 
-require("dotenv").config();
+// --- INITIALIZATION ---
 
-const express = require("express");
-const http = require("http");
-const cors = require("cors");
-const { Server } = require("socket.io");
-const { createClient } = require("@supabase/supabase-js");
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY || !process.env.FIREBASE_PROJECT_ID || !process.env.FIREBASE_CLIENT_EMAIL || !process.env.FIREBASE_PRIVATE_KEY) {
+  console.error('[Fatal] Missing required environment variables. Check SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and FIREBASE credentials.');
+  process.exit(1);
+}
 
 const app = express();
-
-app.use(cors({
-    origin: "*",
-    methods: ["GET", "POST"]
-}));
-
-app.use(express.json());
-
 const server = http.createServer(app);
 
-// 1. Configure Socket.IO with appropriate timeouts
+app.get('/health', (req, res) => res.status(200).send('LoveMessenger Signaling Server is healthy!'));
+app.get('/', (req, res) => res.send('LoveMessenger Signaling Server is running.'));
 const io = new Server(server, {
-  pingInterval: 10000, // Matches client ping
-  pingTimeout: 5000,
-  cors: { origin: "*" }
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
 });
 
-io.on("connection", (socket) => {
-  // 2. Handle the application-level heartbeat
-  socket.on("ping-server", (data) => {
-    socket.emit("pong-client", { serverTime: Date.now() });
-  });
-
-  // ... existing signaling logic
-});
-
-// 3. Optional: Add a simple health check route for the HTTP Keep-Alive
-app.get("/", (req, res) => res.send("Signaling Server Active"));
-
+// Supabase Setup
 const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const onlineUsers = new Map();
+// Firebase Admin Setup
+const privateKey = process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n');
+admin.initializeApp({
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: privateKey
+  })
+});
 
-app.get("/", (req, res) => {
-    res.json({
-        success: true,
-        message: "Messenger Signaling Server Running",
-        onlineUsers: onlineUsers.size,
-        uptime: process.uptime(),
+// User mapping: userId -> socketId
+const users = new Map();
+
+// --- FCM UTILS ---
+
+async function sendFcmNotification(targetUserId, data, senderId = null) {
+  try {
+    // 1. Fetch recipient profile and sender profile (if senderId provided)
+    const [recipientRes, senderRes] = await Promise.all([
+      supabase.from('profiles').select('fcm_token, full_name').eq('id', targetUserId).single(),
+      senderId ? supabase.from('profiles').select('full_name').eq('id', senderId).single() : Promise.resolve({ data: null })
+    ]);
+
+    const profile = recipientRes.data;
+    const sender = senderRes.data;
+
+    if (recipientRes.error || !profile || !profile.fcm_token) {
+      console.log(`[FCM] No token found for user ${targetUserId}`);
+      return;
+    }
+
+    const senderName = sender ? sender.full_name : (data.callerName || 'Someone');
+
+    const message = {
+      token: profile.fcm_token,
+      data: {
+        ...data,
+        callerName: senderName, // Update with real name
         timestamp: new Date().toISOString()
-    });
-});
-
-app.get("/health", (req, res) => {
-    res.status(200).json({
-        status: "OK",
-        websocket: true,
-        onlineUsers: onlineUsers.size,
-        time: new Date().toISOString()
-    });
-});
-
-io.on("connection", (socket) => {
-
-    const userId =
-        socket.handshake.auth?.userId ||
-        socket.handshake.query?.userId ||
-        socket.handshake.headers["x-user-id"] ||
-        socket.id;
-
-    socket.userId = userId;
-
-    socket.join(userId);
-
-    onlineUsers.set(userId, socket.id);
-
-    console.log(`🟢 ${userId} connected`);
-
-    io.emit("user-online", {
-        userId,
-        online: true
-    });
-
-    socket.on("register-user", (data) => {
-
-        const id = data?.userId || userId;
-
-        socket.userId = id;
-
-        socket.join(id);
-
-        onlineUsers.set(id, socket.id);
-
-        console.log(`✅ Registered : ${id}`);
-
-        io.emit("user-online", {
-            userId: id,
-            online: true
-        });
-
-    });
-      // ==========================
-    // CALL USER
-    // ==========================
-    socket.on("call-user", async (data) => {
-
-        try {
-
-            console.log(`[CALL] ${socket.userId} -> ${data.targetUserId}`);
-
-            await supabase
-                .from("call_history")
-                .insert({
-                    caller_id: socket.userId,
-                    receiver_id: data.targetUserId,
-                    call_type: data.callType || "audio",
-                    status: "CALLING",
-                    started_at: new Date().toISOString()
-                });
-
-            io.to(data.targetUserId).emit("incoming-call", {
-                callerId: socket.userId,
-                callerName: data.callerName,
-                callerPhoto: data.callerPhoto,
-                callType: data.callType || "audio"
-            });
-
-        } catch (err) {
-            console.error(err);
+      },
+      android: {
+        priority: 'high',
+        notification: {
+            channelId: (data.type === 'CALL' || data.type === 'MISSED_CALL') ? 'calls_channel' : 'messages_channel'
         }
+      }
+    };
 
-    });
+    // If it's a message, add notification body for system display
+    if (data.type === 'MESSAGE' || data.type === 'MISSED_CALL') {
+      message.notification = {
+        title: data.title || 'New Message',
+        body: data.body || 'You have a new message'
+      };
+    }
 
-    // ==========================
-    // RINGING
-    // ==========================
-    socket.on("ringing", (data) => {
+    const response = await admin.messaging().send(message);
+    console.log(`[FCM] Successfully sent message to ${targetUserId}:`, response);
+  } catch (error) {
+    console.error(`[FCM] Error sending message to ${targetUserId}:`, error);
+    if (error.code === 'messaging/registration-token-not-registered' || error.code === 'messaging/invalid-registration-token') {
+      console.log(`[FCM] Removing invalid token for user ${targetUserId}`);
+      await supabase
+        .from('profiles')
+        .update({ fcm_token: null })
+        .eq('id', targetUserId);
+    }
+  }
+}
 
-        io.to(data.targetUserId).emit("incoming-ringing", {
-            callerId: socket.userId
-        });
+// --- SOCKET.IO LOGIC ---
 
-    });
+io.on('connection', (socket) => {
+  const { userId } = socket.handshake.auth || socket.handshake.query;
+  
+  if (!userId) {
+    console.log('[Socket] Connection rejected: No userId provided');
+    socket.disconnect();
+    return;
+  }
 
-    // ==========================
-    // ACCEPT CALL
-    // ==========================
-    socket.on("accept-call", async (data) => {
+  console.log(`[Socket] User connected: ${userId} (Socket: ${socket.id})`);
+  users.set(userId, socket.id);
+  
+  // Broadcast status
+  io.emit('user-status-changed', { userId, status: 'online' });
 
-        await supabase
-            .from("call_history")
-            .update({
-                status: "ACCEPTED"
-            })
-            .eq("caller_id", data.callerId)
-            .eq("receiver_id", socket.userId)
-            .eq("status", "CALLING");
+  // 1. New Message
+  socket.on('send-message', async (data) => {
+    console.log(`[Message] From ${userId} to ${data.targetUserId}`);
+    
+    const targetSocketId = users.get(data.targetUserId);
+    if (targetSocketId) {
+      // Realtime delivery
+      io.to(targetSocketId).emit('receive-message', data);
+    } else {
+      // Background delivery via FCM
+      const isMissedCall = (data.content || '').includes('Missed Call');
+      await sendFcmNotification(data.targetUserId, {
+        type: isMissedCall ? 'MISSED_CALL' : 'MESSAGE',
+        title: isMissedCall ? 'Missed Call' : 'New Message',
+        body: data.text || data.content || 'Tap to view',
+        senderId: userId,
+        chatId: data.chatId || '',
+        messageId: data.id
+      }, userId);
+    }
+  });
 
-        io.to(data.callerId).emit("call-accepted", {
-            calleeId: socket.userId
-        });
+  // 2. Call Signaling
+  socket.on('call-user', async (data) => {
+    console.log(`[Call] Offer from ${userId} to ${data.targetUserId}`);
+    
+    const targetSocketId = users.get(data.targetUserId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('incoming-call', data);
+    } else {
+      // Send FCM for incoming call
+      await sendFcmNotification(data.targetUserId, {
+        type: 'CALL',
+        title: 'Incoming Call',
+        body: `${data.callerName || 'Someone'} is calling you...`,
+        callerId: userId,
+        callerName: data.callerName || 'Someone',
+        callType: data.isVideo ? 'VIDEO' : 'AUDIO',
+        sdp: data.offer ? data.offer.sdp : ''
+      }, userId);
+    }
+  });
 
-    });
+  socket.on('accept-call', (data) => {
+    const targetSocketId = users.get(data.targetUserId);
+    if (targetSocketId) io.to(targetSocketId).emit('call-accepted', data);
+  });
 
-    // ==========================
-    // REJECT CALL
-    // ==========================
-    socket.on("reject-call", (data) => {
+  socket.on('reject-call', async (data) => {
+    const targetSocketId = users.get(data.targetUserId);
+    if (targetSocketId) io.to(targetSocketId).emit('call-rejected', data);
+  });
 
-        io.to(data.callerId).emit("call-rejected", {
-            receiverId: socket.userId
-        });
+  socket.on('end-call', (data) => {
+    const targetSocketId = users.get(data.targetUserId);
+    if (targetSocketId) io.to(targetSocketId).emit('call-ended', data);
+  });
 
-    });
+  socket.on('ice-candidate', (data) => {
+    const targetSocketId = users.get(data.targetUserId);
+    if (targetSocketId) io.to(targetSocketId).emit('ice-candidate', data);
+  });
 
-    // ==========================
-    // WEBRTC OFFER
-    // ==========================
-    socket.on("offer", (data) => {
+  socket.on('ringing', (data) => {
+    const targetSocketId = users.get(data.targetUserId);
+    if (targetSocketId) io.to(targetSocketId).emit('ringing', data);
+  });
 
-        io.to(data.targetUserId).emit("offer", {
-            senderId: socket.userId,
-            offer: data.offer
-        });
+  // 3. Status
+  socket.on('ping', () => socket.emit('pong'));
 
-    });
-
-    // ==========================
-    // WEBRTC ANSWER
-    // ==========================
-    socket.on("answer", (data) => {
-
-        io.to(data.targetUserId).emit("answer", {
-            senderId: socket.userId,
-            answer: data.answer
-        });
-
-    });
-
-    // ==========================
-    // ICE CANDIDATE
-    // ==========================
-    socket.on("ice-candidate", (data) => {
-
-        io.to(data.targetUserId).emit("ice-candidate", {
-            senderId: socket.userId,
-            candidate: data.candidate
-        });
-
-    });
-
-    // ==========================
-    // END CALL
-    // ==========================
-    socket.on("end-call", async (data) => {
-
-        await supabase
-            .from("call_history")
-            .update({
-                status: "ENDED",
-                ended_at: new Date().toISOString()
-            })
-            .eq("caller_id", data.callerId)
-            .eq("receiver_id", data.targetUserId);
-
-        io.to(data.targetUserId).emit("call-ended", {
-            senderId: socket.userId
-        });
-
-    });
-      // ==========================
-    // SEND MESSAGE
-    // ==========================
-    socket.on("send-message", (data) => {
-
-        io.to(data.targetUserId).emit("receive-message", {
-            senderId: socket.userId,
-            message: data.message,
-            type: data.type || "text",
-            image: data.image || null,
-            file: data.file || null,
-            createdAt: new Date().toISOString()
-        });
-
-    });
-
-    // ==========================
-    // TYPING
-    // ==========================
-    socket.on("typing", (data) => {
-
-        io.to(data.targetUserId).emit("typing", {
-            senderId: socket.userId
-        });
-
-    });
-
-    socket.on("stop-typing", (data) => {
-
-        io.to(data.targetUserId).emit("stop-typing", {
-            senderId: socket.userId
-        });
-
-    });
-
-    // ==========================
-    // MESSAGE SEEN
-    // ==========================
-    socket.on("message-seen", (data) => {
-
-        io.to(data.targetUserId).emit("message-seen", {
-            messageId: data.messageId,
-            readerId: socket.userId
-        });
-
-    });
-
-    // ==========================
-    // HEARTBEAT
-    // ==========================
-    socket.on("ping-server", () => {
-
-        socket.emit("pong-server", {
-            time: Date.now()
-        });
-
-    });
-
-    // ==========================
-    // DISCONNECT
-    // ==========================
-    socket.on("disconnect", () => {
-
-        onlineUsers.delete(socket.userId);
-
-        console.log(`🔴 ${socket.userId} disconnected`);
-
-        io.emit("user-offline", {
-            userId: socket.userId,
-            online: false
-        });
-
-    });
-
-    // ==========================
-    // SOCKET ERROR
-    // ==========================
-    socket.on("error", (err) => {
-
-        console.error("Socket Error:", err);
-
-    });
-
+  socket.on('disconnect', () => {
+    console.log(`[Socket] User disconnected: ${userId}`);
+    if (users.get(userId) === socket.id) {
+      users.delete(userId);
+      io.emit('user-status-changed', { userId, status: 'offline' });
+    }
+  });
 });
 
-// ==========================
-// SERVER ERROR
-// ==========================
-server.on("error", (err) => {
+// --- SERVER START ---
 
-    console.error("Server Error:", err);
-
-});
-
-// ==========================
-// START SERVER
-// ==========================
-const PORT = process.env.PORT || 10000;
-
-server.listen(PORT, "0.0.0.0", () => {
-
-    console.log("==================================");
-    console.log("🚀 Messenger Signaling Server");
-    console.log(`🌐 Port : ${PORT}`);
-    console.log("✅ Production Ready");
-    console.log("==================================");
-
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`LoveMessenger Signaling Server running on port ${PORT}`);
 });
