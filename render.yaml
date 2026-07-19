@@ -9,6 +9,6 @@ services:
       - key: PORT
         value: 10000
       - key: SUPABASE_URL
-        sync: false
+        sync: true
       - key: SUPABASE_ANON_KEY
-        sync: false
+        sync: true
